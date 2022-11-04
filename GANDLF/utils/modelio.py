@@ -61,7 +61,7 @@ def save_model(model_dict, model, params, path, onnx_export=True):
         return
     else:
         try:
-            onnx_path = path.replace("pth.tar", "onnx")
+            onnx_path = path.rstrip("pth.tar") + "onnx"
             if model_dimension == 2:
                 dummy_input = torch.randn(
                     (1, num_channel, input_shape[0], input_shape[1])
@@ -82,47 +82,25 @@ def save_model(model_dict, model, params, path, onnx_export=True):
                     input_names=["input"],
                     output_names=["output"],
                 )
-
-            ov_output_dir = os.path.dirname(os.path.abspath(path))
         except RuntimeWarning:
             print("WARNING: Cannot export to ONNX model.")
             return
 
         try:
-            if model_dimension == 2:
-                subprocess.call(
-                    [
-                        "mo",
-                        "--input_model",
-                        "{0}".format(onnx_path),
-                        "--input_shape",
-                        "[1,{0},{1},{2}]".format(
-                            num_channel, input_shape[0], input_shape[1]
-                        ),
-                        "--data_type",
-                        "{0}".format(ov_output_data_type),
-                        "--output_dir",
-                        "{0}".format(ov_output_dir),
-                    ],
-                )
-            else:
-                subprocess.call(
-                    [
-                        "mo",
-                        "--input_model",
-                        "{0}".format(onnx_path),
-                        "--input_shape",
-                        "[1,{0},{1},{2},{3}]".format(
-                            num_channel, input_shape[0], input_shape[1], input_shape[2]
-                        ),
-                        "--data_type",
-                        "{0}".format(ov_output_data_type),
-                        "--output_dir",
-                        "{0}".format(ov_output_dir),
-                    ],
-                )
-        except subprocess.CalledProcessError:
-            print("WARNING: OpenVINO Model Optimizer IR conversion failed.")
+            from openvino.runtime import Core, serialize
+            core = Core()
+            model = core.read_model(onnx_path)
+
+            # There is an alternative way to trigger FP16 execution on GPU in openvino/master
+            # In future avoid using this code under the next if-block for model export, export it as-is
+            if ov_output_data_type.upper() == 'FP16':
+                from openvino.offline_transformations import compress_model_transformation
+                compress_model_transformation(model)
+
+            ov_path = path.rstrip('onnx') + 'xml'
+            serialize(model, ov_path)
+        except:
+            print("WARNING: Conversion to OpenVINO IR failed.")
 
 
 def load_model(path, device, full_sanity_check=True):
@@ -188,9 +166,10 @@ def load_ov_model(path, device="CPU"):
 
     if device == "GPU":
         core.set_property({"CACHE_DIR": os.path.dirname(os.path.abspath(path))})
+        # core.set_property("GPU", ov.hint.inference_precision(ov.Type.f16))  # available in openvino/master
 
-    model = core.read_model(model=path, weights=path.replace("xml", "bin"))
-    compiled_model = core.compile_model(model=model, device_name=device.upper())
+    model = core.read_model(path)
+    compiled_model = core.compile_model(model, device.upper())
     input_layer = compiled_model.inputs
     output_layer = compiled_model.outputs
 
